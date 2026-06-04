@@ -1,0 +1,30 @@
+# Токен и локальные настройки
+.env
+
+# База данных
+data/data.json
+
+# Виртуальное окружение
+.venv/
+
+# Python кеши
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Тестовые кеши
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE и редакторы
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
