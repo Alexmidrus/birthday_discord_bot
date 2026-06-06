@@ -723,6 +723,9 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/config timezone` — Глобальный часовой пояс сервера\n"
             "`/config font` — Изменить шрифт\n"
             "`/config image` — Настроить фон (URL или `local`)\n"
+            "`/config bd-override-set` — Установить день рождения пользователю\n"
+            "`/config bd-override-remove` — Удалить день рождения пользователя\n"
+            "`/config tz-override-set` — Установить часовой пояс пользователю\n"
             "`/birthday test` — 🛠️ Проверить открытку"
         ),
         color=discord.Color.blurple()
@@ -891,6 +894,85 @@ async def config_font(interaction: discord.Interaction, filename: str) -> None:
     all_d[str(interaction.guild.id)] = d
     save_data(all_d)
     await interaction.response.send_message(f"✅ Шрифт изменен на `{filename}`.", ephemeral=True)
+
+
+@config_group.command(name="bd-override-set", description="[Админ] Установить день рождения указанному пользователю")
+async def config_bd_override_set(interaction: discord.Interaction,
+                                  user: discord.Member,
+                                  day: app_commands.Range[int, 1, 31],
+                                  month: app_commands.Range[int, 1, 12]) -> None:
+    """Устанавливает день рождения указанному участнику сервера от имени администратора.
+
+    Позволяет добавить или перезаписать дату рождения любого пользователя
+    без его участия. Год не сохраняется — поздравление отправляется ежегодно.
+
+    Args:
+        interaction: Объект взаимодействия Discord.
+        user: Участник сервера, которому устанавливается дата.
+        day: День рождения от 1 до 31.
+        month: Месяц рождения от 1 до 12.
+    """
+    try:
+        # Проверяем, что дата реально существует (например, 31.02 недопустима)
+        date_str = f"{day:02d}.{month:02d}"
+        datetime.datetime.strptime(f"2000.{date_str}", "%Y.%d.%m")
+        d, all_d = get_guild_data(interaction.guild.id)
+        d["birthdays"][str(user.id)] = date_str
+        all_d[str(interaction.guild.id)] = d
+        save_data(all_d)
+        await interaction.response.send_message(
+            f"✅ День рождения {user.mention} установлен на **{date_str}**.", ephemeral=True)
+    except ValueError:
+        await interaction.response.send_message("❌ Указана несуществующая дата.", ephemeral=True)
+
+
+@config_group.command(name="bd-override-remove", description="[Админ] Удалить день рождения указанного пользователя")
+async def config_bd_override_remove(interaction: discord.Interaction,
+                                     user: discord.Member) -> None:
+    """Удаляет день рождения указанного участника сервера от имени администратора.
+
+    Args:
+        interaction: Объект взаимодействия Discord.
+        user: Участник сервера, чья дата рождения удаляется.
+    """
+    d, all_d = get_guild_data(interaction.guild.id)
+    if str(user.id) in d.get("birthdays", {}):
+        del d["birthdays"][str(user.id)]
+        all_d[str(interaction.guild.id)] = d
+        save_data(all_d)
+        await interaction.response.send_message(
+            f"🗑️ День рождения {user.mention} удалён.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"⚠️ У {user.mention} не зарегистрирован день рождения.", ephemeral=True)
+
+
+@config_group.command(name="tz-override-set", description="[Админ] Установить часовой пояс указанному пользователю")
+async def config_tz_override_set(interaction: discord.Interaction,
+                                  user: discord.Member,
+                                  tz_name: str) -> None:
+    """Устанавливает личный часовой пояс указанному участнику сервера от имени администратора.
+
+    Переопределяет серверный часовой пояс для конкретного пользователя.
+    Поздравление будет отправлено в 06:00 по указанному поясу.
+
+    Args:
+        interaction: Объект взаимодействия Discord.
+        user: Участник сервера, которому устанавливается часовой пояс.
+        tz_name: Название таймзоны в формате IANA, например ``Europe/Moscow``.
+    """
+    try:
+        zoneinfo.ZoneInfo(tz_name)
+        d, all_d = get_guild_data(interaction.guild.id)
+        if "user_timezones" not in d:
+            d["user_timezones"] = {}
+        d["user_timezones"][str(user.id)] = tz_name
+        all_d[str(interaction.guild.id)] = d
+        save_data(all_d)
+        await interaction.response.send_message(
+            f"✅ Часовой пояс {user.mention} установлен на `{tz_name}`.", ephemeral=True)
+    except zoneinfo.ZoneInfoNotFoundError:
+        await interaction.response.send_message("❌ Ошибка: Неверное имя таймзоны.", ephemeral=True)
 
 
 @config_group.command(name="image", description="Ссылка на фон или 'local'")
