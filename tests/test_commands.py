@@ -4,21 +4,24 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import bot
 
 # discord.py оборачивает команды в Command-объекты; тестируем через .callback
-config_channel     = bot.config_channel.callback
-config_texts       = bot.config_texts.callback
-config_plural      = bot.config_plural.callback
-config_color_title = bot.config_color_title.callback
-config_color_msg   = bot.config_color_msg.callback
-config_color_name  = bot.config_color_name.callback
-config_timezone    = bot.config_timezone.callback
-config_font        = bot.config_font.callback
-config_image       = bot.config_image.callback
-birthday_set       = bot.birthday_set.callback
-birthday_timezone  = bot.birthday_timezone.callback
-birthday_remove    = bot.birthday_remove.callback
-birthday_list      = bot.birthday_list.callback
-birthday_test      = bot.birthday_test.callback
-help_command       = bot.help_command.callback
+config_channel          = bot.config_channel.callback
+config_texts            = bot.config_texts.callback
+config_plural           = bot.config_plural.callback
+config_color_title      = bot.config_color_title.callback
+config_color_msg        = bot.config_color_msg.callback
+config_color_name       = bot.config_color_name.callback
+config_timezone         = bot.config_timezone.callback
+config_font             = bot.config_font.callback
+config_image            = bot.config_image.callback
+config_bd_override_set    = bot.config_bd_override_set.callback
+config_bd_override_remove = bot.config_bd_override_remove.callback
+config_tz_override_set    = bot.config_tz_override_set.callback
+birthday_set            = bot.birthday_set.callback
+birthday_timezone       = bot.birthday_timezone.callback
+birthday_remove         = bot.birthday_remove.callback
+birthday_list           = bot.birthday_list.callback
+birthday_test           = bot.birthday_test.callback
+help_command            = bot.help_command.callback
 
 
 def _sent_text(mock_interaction):
@@ -309,3 +312,129 @@ class TestBirthdayTest:
 
         avatars = mock_card.call_args.args[0]
         assert len(avatars) == 2
+
+
+def _make_target_user(user_id: int = 111222333) -> MagicMock:
+    """Создаёт мок-участника сервера с заданным id."""
+    user = MagicMock()
+    user.id = user_id
+    user.mention = f"<@{user_id}>"
+    return user
+
+
+class TestConfigBdOverrideSet:
+    async def test_sets_birthday_for_target_user(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=10, month=5)
+        assert bot.load_data()["123456789"]["birthdays"][str(target.id)] == "10.05"
+
+    async def test_date_zero_padded(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=1, month=1)
+        assert bot.load_data()["123456789"]["birthdays"][str(target.id)] == "01.01"
+
+    async def test_overwrites_existing_birthday(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=1, month=1)
+        await config_bd_override_set(mock_interaction, user=target, day=20, month=8)
+        assert bot.load_data()["123456789"]["birthdays"][str(target.id)] == "20.08"
+
+    async def test_invalid_date_returns_error(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=31, month=2)
+        assert "❌" in _sent_text(mock_interaction)
+
+    async def test_invalid_date_not_saved(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=30, month=2)
+        assert bot.load_data() == {}
+
+    async def test_success_response_contains_date(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=15, month=7)
+        assert "15.07" in _sent_text(mock_interaction)
+
+    async def test_does_not_affect_other_users(self, mock_interaction, tmp_data):
+        target = _make_target_user(111)
+        other = _make_target_user(222)
+        await config_bd_override_set(mock_interaction, user=target, day=5, month=3)
+        await config_bd_override_set(mock_interaction, user=other, day=9, month=9)
+        data = bot.load_data()["123456789"]["birthdays"]
+        assert data["111"] == "05.03"
+        assert data["222"] == "09.09"
+
+
+class TestConfigBdOverrideRemove:
+    async def test_removes_existing_birthday(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=12, month=6)
+        await config_bd_override_remove(mock_interaction, user=target)
+        assert str(target.id) not in bot.load_data()["123456789"]["birthdays"]
+
+    async def test_remove_nonexistent_warns(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_remove(mock_interaction, user=target)
+        assert "⚠️" in _sent_text(mock_interaction)
+
+    async def test_remove_nonexistent_does_not_crash(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        # Не должно бросать исключение
+        await config_bd_override_remove(mock_interaction, user=target)
+
+    async def test_success_response_contains_trash_emoji(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_bd_override_set(mock_interaction, user=target, day=1, month=1)
+        await config_bd_override_remove(mock_interaction, user=target)
+        assert "🗑️" in _sent_text(mock_interaction)
+
+    async def test_removes_only_target_user(self, mock_interaction, tmp_data):
+        t1 = _make_target_user(111)
+        t2 = _make_target_user(222)
+        await config_bd_override_set(mock_interaction, user=t1, day=1, month=1)
+        await config_bd_override_set(mock_interaction, user=t2, day=2, month=2)
+        await config_bd_override_remove(mock_interaction, user=t1)
+        data = bot.load_data()["123456789"]["birthdays"]
+        assert "111" not in data
+        assert data["222"] == "02.02"
+
+
+class TestConfigTzOverrideSet:
+    async def test_valid_timezone_saved_for_target(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="Europe/Moscow")
+        assert bot.load_data()["123456789"]["user_timezones"][str(target.id)] == "Europe/Moscow"
+
+    async def test_utc_timezone_saved(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="UTC")
+        assert bot.load_data()["123456789"]["user_timezones"][str(target.id)] == "UTC"
+
+    async def test_overwrites_existing_timezone(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="UTC")
+        await config_tz_override_set(mock_interaction, user=target, tz_name="Asia/Tokyo")
+        assert bot.load_data()["123456789"]["user_timezones"][str(target.id)] == "Asia/Tokyo"
+
+    async def test_invalid_timezone_returns_error(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="Invalid/Zone")
+        assert "❌" in _sent_text(mock_interaction)
+
+    async def test_invalid_timezone_not_saved(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="Fake/TZ")
+        assert bot.load_data() == {}
+
+    async def test_success_response_contains_tz_name(self, mock_interaction, tmp_data):
+        target = _make_target_user()
+        await config_tz_override_set(mock_interaction, user=target, tz_name="Europe/London")
+        assert "Europe/London" in _sent_text(mock_interaction)
+
+    async def test_does_not_affect_other_users(self, mock_interaction, tmp_data):
+        t1 = _make_target_user(111)
+        t2 = _make_target_user(222)
+        await config_tz_override_set(mock_interaction, user=t1, tz_name="UTC")
+        await config_tz_override_set(mock_interaction, user=t2, tz_name="Asia/Tokyo")
+        tzs = bot.load_data()["123456789"]["user_timezones"]
+        assert tzs["111"] == "UTC"
+        assert tzs["222"] == "Asia/Tokyo"

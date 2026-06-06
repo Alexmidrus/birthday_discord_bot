@@ -26,6 +26,9 @@ A highly customizable Discord bot that automatically congratulates server member
 * `/config timezone` — Set the server-wide default timezone.
 * `/config font` — Select a custom font file.
 * `/config image` — Set a custom background image or GIF.
+* `/config bd-override-set` — Set a birthday for any user on behalf of an admin.
+* `/config bd-override-remove` — Remove a user's birthday on behalf of an admin.
+* `/config tz-override-set` — Set a personal timezone for any user on behalf of an admin.
 
 ---
 
@@ -42,6 +45,7 @@ A highly customizable Discord bot that automatically congratulates server member
 * **Кастомизация:** * Выбор шрифтов (закиньте `.ttf` в папку бота).
 * Настройка цветов каждого элемента текста через HEX-коды.
 * Возможность установки фонового изображения или ссылки на GIF.
+* **Административное управление днями рождения:** Администраторы могут устанавливать, удалять дни рождения и часовые пояса любому участнику без его участия.
 
 
 
@@ -71,6 +75,9 @@ A highly customizable Discord bot that automatically congratulates server member
 * `/config timezone tz_name:..` — Установка часового пояса сервера по умолчанию (используется, если пользователь не задал свой личный пояс).
 * `/config font filename:..` — Выбор шрифта из файла `.ttf`, загруженного в папку бота.
 * `/config image url:..` — Ссылка на картинку/GIF для фона или слово `local` для использования файла `images/birthday_bg.png`.
+* `/config bd-override-set user:.. day:.. month:..` — Устанавливает день рождения указанному пользователю от имени администратора (без участия самого пользователя).
+* `/config bd-override-remove user:..` — Удаляет зарегистрированный день рождения у указанного пользователя.
+* `/config tz-override-set user:.. tz_name:..` — Устанавливает личный часовой пояс указанному пользователю (например, `Europe/Moscow`).
 
 #### 🧪 Команды для тестирования
 
