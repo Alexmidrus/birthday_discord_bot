@@ -27,6 +27,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import json
+import logging
 import os
 import datetime
 import aiohttp
@@ -34,6 +35,7 @@ import re
 import random
 import zoneinfo
 from io import BytesIO
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -41,11 +43,32 @@ load_dotenv()
 
 DATA_DIR   = "data"
 DATA_FILE  = os.path.join(DATA_DIR, "data.json")
+SENT_LOG_FILE = os.path.join(DATA_DIR, "sent_log.json")
+LOG_FILE   = os.path.join(DATA_DIR, "bot.log")
 BG_IMAGE   = "images/birthday_bg.png"
 FONTS_DIR  = "fonts"
 DEFAULT_FONT = os.path.join(FONTS_DIR, "Jura-Bold.ttf")
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Логирование
+# ---------------------------------------------------------------------------
+# Отдельный логгер (не 'discord') с собственными хендлерами, чтобы не
+# зависеть от того, настраивает ли discord.py логирование через bot.run().
+
+logger = logging.getLogger("birthday_bot")
+logger.setLevel(logging.INFO)
+
+_log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+logger.addHandler(_console_handler)
+
+_file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+_file_handler.setFormatter(_log_formatter)
+logger.addHandler(_file_handler)
 
 _EMOJI_RE = re.compile(
     "["
@@ -517,6 +540,7 @@ class BirthdayBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         self.check_birthdays.start()
         await self.tree.sync()
+        logger.info("setup_hook завершён: HTTP-сессия создана, check_birthdays запущен, slash-команды синхронизированы.")
 
     async def close(self) -> None:
         """Корректно завершает работу бота.
@@ -543,11 +567,19 @@ class BirthdayBot(commands.Bot):
         Логика пропуска:
             - Канал для поздравлений не настроен.
             - Канал или сервер недоступен (бот покинул сервер).
-            - Поздравление уже было отправлено в текущем году (``sent_years``).
+            - Поздравление уже было отправлено в текущем году (журнал
+              ``sent_log.json``, см. :func:`load_sent_log`).
             - Участник покинул сервер.
 
-        После успешной отправки сохраняет год в ``sent_years``, чтобы
-        предотвратить повторное поздравление в том же году.
+        Отметка "поздравление отправлено" пишется в ``sent_log.json`` сразу
+        после успешного ``channel.send`` для конкретного сервера — не
+        батчем в конце всей проверки. Это защищает от дублей: если бот
+        упадёт сразу после отправки на одном сервере, но до обработки
+        остальных, уже отправленное поздравление не потеряется и не
+        уйдёт повторно после перезапуска. По той же причине отметка
+        ставится только после успешной отправки, а не заранее — если
+        ``channel.send`` упадёт с ошибкой, попытка будет повторена на
+        следующей часовой проверке в тот же день.
 
         Note:
             Метод вызывается как обычная корутина из ``before_check_birthdays``
@@ -557,7 +589,9 @@ class BirthdayBot(commands.Bot):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_year = now_utc.year
         all_data = load_data()
-        changed = False
+        sent_log = load_sent_log()
+
+        logger.info("Проверка дней рождения запущена (%s).", now_utc.isoformat(timespec="seconds"))
 
         for guild_id_str, guild_data in all_data.items():
             channel_id = guild_data.get("channel_id")
@@ -566,24 +600,26 @@ class BirthdayBot(commands.Bot):
 
             channel = self.get_channel(channel_id)
             if not channel:
+                logger.warning("Сервер %s: канал %s недоступен, пропускаю.", guild_id_str, channel_id)
                 continue
 
             server_tz_str = guild_data.get("timezone", "UTC")
-            if "sent_years" not in guild_data:
-                guild_data["sent_years"] = {}
-            if "user_timezones" not in guild_data:
-                guild_data["user_timezones"] = {}
+            user_timezones = guild_data.get("user_timezones", {})
+            guild_sent = sent_log.setdefault(guild_id_str, {})
 
             to_congratulate = []
 
             for user_id_str, date_str in guild_data.get("birthdays", {}).items():
-                if guild_data["sent_years"].get(user_id_str) == current_year:
+                if guild_sent.get(user_id_str) == current_year:
                     continue
 
-                user_tz_str = guild_data["user_timezones"].get(user_id_str, server_tz_str)
+                user_tz_str = user_timezones.get(user_id_str, server_tz_str)
                 try:
                     tz = zoneinfo.ZoneInfo(user_tz_str)
                 except Exception:
+                    logger.warning(
+                        "Сервер %s: некорректный часовой пояс '%s' у пользователя %s, использую UTC.",
+                        guild_id_str, user_tz_str, user_id_str)
                     tz = zoneinfo.ZoneInfo("UTC")
 
                 user_local_time = now_utc.astimezone(tz)
@@ -597,34 +633,39 @@ class BirthdayBot(commands.Bot):
 
             guild = self.get_guild(int(guild_id_str))
             if not guild:
+                logger.warning("Сервер %s недоступен (бот больше не на сервере?), пропускаю.", guild_id_str)
                 continue
 
-            avatars, usernames, mentions = [], [], []
+            avatars, usernames, matched_uids = [], [], []
 
             for uid in to_congratulate:
                 user = guild.get_member(int(uid))
-                if user:
-                    avatars.append(await user.display_avatar.replace(format="png", size=256).read())
-                    usernames.append(user.display_name)
-                    mentions.append(user.mention)
-                    guild_data["sent_years"][uid] = current_year
+                if not user:
+                    logger.warning("Сервер %s: участник %s не найден, пропускаю.", guild_id_str, uid)
+                    continue
+                avatars.append(await user.display_avatar.replace(format="png", size=256).read())
+                usernames.append(user.display_name)
+                matched_uids.append(uid)
 
             if not avatars:
                 continue
 
-            image_url = guild_data.get("image_url", "local")
-            t_text, m_text = _pick_texts(guild_data, is_plural=len(avatars) > 1)
-            bg_bytes = await _load_bg_bytes(image_url, self.session)
-            file, embeds = _build_card_message(avatars, usernames, bg_bytes, t_text, m_text, guild_data, image_url)
+            try:
+                image_url = guild_data.get("image_url", "local")
+                t_text, m_text = _pick_texts(guild_data, is_plural=len(avatars) > 1)
+                bg_bytes = await _load_bg_bytes(image_url, self.session)
+                file, embeds = _build_card_message(avatars, usernames, bg_bytes, t_text, m_text, guild_data, image_url)
+                await channel.send(content="🎉 @everyone", embeds=embeds, file=file)
+            except Exception:
+                logger.exception(
+                    "Сервер %s: не удалось отправить поздравление для %s, повторю на следующей проверке.",
+                    guild_id_str, matched_uids)
+                continue
 
-            mention_str = " ".join(mentions)
-            await channel.send(content=f"🎉 {mention_str}", embeds=embeds, file=file)
-
-            all_data[guild_id_str] = guild_data
-            changed = True
-
-        if changed:
-            save_data(all_data)
+            for uid in matched_uids:
+                guild_sent[uid] = current_year
+            save_sent_log(sent_log)
+            logger.info("Сервер %s: поздравление отправлено для %s.", guild_id_str, matched_uids)
 
     @check_birthdays.before_loop
     async def before_check_birthdays(self) -> None:
@@ -639,6 +680,21 @@ class BirthdayBot(commands.Bot):
         now = datetime.datetime.now(datetime.timezone.utc)
         seconds_until_next_hour = 3600 - (now.minute * 60 + now.second)
         await asyncio.sleep(seconds_until_next_hour)
+
+    @check_birthdays.error
+    async def check_birthdays_error(self, error: BaseException) -> None:
+        """Логирует необработанные ошибки цикла и перезапускает его.
+
+        По умолчанию ``tasks.loop`` при необработанном исключении в теле
+        задачи молча останавливает цикл насовсем (до перезапуска процесса),
+        не оставляя следа в логах — из-за этого падение можно было заметить
+        только по факту "бот перестал поздравлять". Здесь ошибка логируется
+        с трассировкой, а цикл перезапускается, чтобы часовая проверка не
+        прерывалась из-за одного сбойного прогона.
+        """
+        logger.exception("check_birthdays упал с необработанной ошибкой, перезапускаю цикл.", exc_info=error)
+        if not self.check_birthdays.is_running():
+            self.check_birthdays.restart()
 
 
 bot = BirthdayBot()
@@ -671,6 +727,34 @@ def save_data(data: dict) -> None:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
+def load_sent_log() -> dict:
+    """Загружает журнал уже отправленных поздравлений из отдельного файла.
+
+    Хранится отдельно от ``data.json``, чтобы отметка об отправке
+    сохранялась на диск сразу после каждого успешного поздравления, а не
+    только в конце всей часовой проверки — это исключает повторную отправку
+    при падении/перезапуске бота в середине обработки нескольких серверов.
+
+    Returns:
+        Словарь вида ``{guild_id: {user_id: year}}``. Если файл не
+        существует, возвращает пустой словарь.
+    """
+    if not os.path.exists(SENT_LOG_FILE):
+        return {}
+    with open(SENT_LOG_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save_sent_log(data: dict) -> None:
+    """Сохраняет журнал отправленных поздравлений в JSON-файл.
+
+    Args:
+        data: Словарь вида ``{guild_id: {user_id: year}}`` для записи.
+    """
+    with open(SENT_LOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
 def get_guild_data(guild_id: int) -> tuple[dict, dict]:
     """Возвращает данные конкретного сервера, создавая запись при первом обращении.
 
@@ -695,7 +779,7 @@ def get_guild_data(guild_id: int) -> tuple[dict, dict]:
             "plural_message": "Поздравляем вас с днем рождения! Двойной праздник - двойная радость!",
             "color_title": "#00d4ff", "color_msg": "#c3d2eb", "color_name": "#ffffff",
             "image_url": "local", "color": "#FF5733", "timezone": "UTC", "font": DEFAULT_FONT,
-            "birthdays": {}, "user_timezones": {}, "sent_years": {}
+            "birthdays": {}, "user_timezones": {}
         }
     return data[str(guild_id)], data
 
@@ -1072,6 +1156,16 @@ async def birthday_list(interaction: discord.Interaction) -> None:
 
     Args:
         interaction: Объект взаимодействия Discord.
+
+    Note:
+        Для каждой записи проверяется, состоит ли пользователь ещё в
+        гильдии (``guild.get_member``). Прямая вставка ``<@user_id>`` без
+        этой проверки выглядела нормально для действующих участников (их
+        клиент Discord резолвит ID в ник по своему кэшу), но для тех, кто
+        покинул сервер или удалил аккаунт, рендерилась как нечитаемый
+        сырой текст ``<@id>`` — Discord просто не может разрешить такой ID
+        в отображаемое имя. Явная проверка через ``get_member`` заменяет
+        такие записи понятной пометкой.
     """
     d, _ = get_guild_data(interaction.guild.id)
     birthdays = d.get("birthdays", {})
@@ -1082,7 +1176,11 @@ async def birthday_list(interaction: discord.Interaction) -> None:
         birthdays.items(),
         key=lambda item: (int(item[1].split('.')[1]), int(item[1].split('.')[0]))
     )
-    lines = [f"**{date}** — <@{user_id}>" for user_id, date in sorted_bdays[:50]]
+    lines = []
+    for user_id, date in sorted_bdays[:50]:
+        member = interaction.guild.get_member(int(user_id))
+        who = member.mention if member else f"*участник покинул сервер* (`{user_id}`)"
+        lines.append(f"**{date}** — {who}")
     description = "\n".join(lines) + ("\n\n*...*" if len(sorted_bdays) > 50 else "")
     await interaction.response.send_message(
         embed=discord.Embed(
@@ -1137,11 +1235,11 @@ bot.tree.add_command(birthday_group)
 @bot.event
 async def on_ready() -> None:
     """Вызывается когда бот успешно подключился к Discord и готов к работе."""
-    print(f'✅ Бот {bot.user} успешно подключен к Discord!')
+    logger.info("Бот %s подключён к Discord. Серверов: %d.", bot.user, len(bot.guilds))
 
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
-    print("❌ ОШИБКА: Токен не найден! Убедись, что файл .env создан.")
+    logger.error("Токен не найден! Убедись, что файл .env создан.")
 else:
     bot.run(TOKEN)

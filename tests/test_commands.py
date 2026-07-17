@@ -230,7 +230,6 @@ class TestBirthdayList:
                 "channel_id": None,
                 "timezone": "UTC",
                 "birthdays": {"111": "01.06", "222": "15.03"},
-                "sent_years": {},
                 "user_timezones": {},
             }
         }
@@ -246,7 +245,7 @@ class TestBirthdayList:
             "123456789": {
                 "channel_id": None, "timezone": "UTC",
                 "birthdays": {"1": "15.12", "2": "01.01", "3": "05.06"},
-                "sent_years": {}, "user_timezones": {},
+                "user_timezones": {},
             }
         }
         with open(tmp_data, 'w', encoding='utf-8') as f:
@@ -255,6 +254,46 @@ class TestBirthdayList:
         embed = mock_interaction.response.send_message.call_args.kwargs["embed"]
         desc = embed.description
         assert desc.index("01.01") < desc.index("05.06") < desc.index("15.12")
+
+    async def test_shows_mention_for_current_member(self, mock_interaction, tmp_data):
+        data = {
+            "123456789": {
+                "channel_id": None, "timezone": "UTC",
+                "birthdays": {"111": "01.06"},
+                "user_timezones": {},
+            }
+        }
+        with open(tmp_data, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        member = MagicMock()
+        member.mention = "<@111>"
+        mock_interaction.guild.get_member = MagicMock(return_value=member)
+
+        await birthday_list(mock_interaction)
+
+        desc = mock_interaction.response.send_message.call_args.kwargs["embed"].description
+        assert "<@111>" in desc
+
+    async def test_shows_left_server_note_for_missing_member(self, mock_interaction, tmp_data):
+        """Bug fix: сырой <@id> для покинувшего сервер участника рендерился
+        в Discord как нечитаемый текст. Теперь показываем понятную пометку."""
+        data = {
+            "123456789": {
+                "channel_id": None, "timezone": "UTC",
+                "birthdays": {"656899242593484823": "13.09"},
+                "user_timezones": {},
+            }
+        }
+        with open(tmp_data, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        mock_interaction.guild.get_member = MagicMock(return_value=None)
+
+        await birthday_list(mock_interaction)
+
+        desc = mock_interaction.response.send_message.call_args.kwargs["embed"].description
+        assert "656899242593484823" in desc
+        assert "<@656899242593484823>" not in desc
+        assert "покинул сервер" in desc
 
 
 class TestHelpCommand:

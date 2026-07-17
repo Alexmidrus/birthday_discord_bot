@@ -3,6 +3,10 @@
 
 # База данных
 data/data.json
+data/sent_log.json
+
+# Логи
+data/bot.log*
 
 # Виртуальное окружение
 .venv/

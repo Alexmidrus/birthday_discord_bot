@@ -27,6 +27,14 @@ def tmp_data(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def tmp_sent_log(tmp_path, monkeypatch):
+    """Перенаправляет SENT_LOG_FILE во временный файл на время теста."""
+    sent_log_file = str(tmp_path / "sent_log.json")
+    monkeypatch.setattr(bot, 'SENT_LOG_FILE', sent_log_file)
+    return sent_log_file
+
+
+@pytest.fixture
 def mock_interaction():
     interaction = MagicMock()
     interaction.guild.id = 123456789

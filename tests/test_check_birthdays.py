@@ -10,14 +10,13 @@ import bot
 FIXED_UTC = datetime.timezone.utc
 
 
-def _guild_data(user_id, date_str, tz="UTC", sent_year=None, channel_id=999):
+def _guild_data(user_id, date_str, tz="UTC", channel_id=999):
     return {
         "111": {
             "channel_id": channel_id,
             "timezone": "UTC",
             "birthdays": {str(user_id): date_str},
             "user_timezones": {str(user_id): tz},
-            "sent_years": {str(user_id): sent_year} if sent_year else {},
             "image_url": "local",
             "title": "Title",
             "message": "Msg",
@@ -49,19 +48,28 @@ def _make_bot(channel=None, guild=None):
     return b
 
 
-async def _run(b, data, now_utc):
-    """Вызывает check_birthdays с замороженным временем."""
+async def _run(b, data, now_utc, sent_log=None):
+    """Вызывает check_birthdays с замороженным временем.
+
+    ``sent_log``, если передан, мутируется кодом на месте (как и настоящий
+    load_sent_log/save_sent_log), поэтому тест может проверить его после
+    вызова через возвращаемый словарь.
+    """
+    if sent_log is None:
+        sent_log = {}
     fake_card = BytesIO(make_png_bytes((1100, 480)))
     b.session = MagicMock()
     with patch.object(bot, 'load_data', return_value=data), \
          patch.object(bot, 'save_data') as mock_save, \
+         patch.object(bot, 'load_sent_log', return_value=sent_log), \
+         patch.object(bot, 'save_sent_log') as mock_save_sent, \
          patch('bot.create_birthday_card', return_value=fake_card), \
          patch('bot._load_bg_bytes', new=AsyncMock(return_value=None)), \
          patch('bot.datetime') as mock_dt:
         mock_dt.datetime.now.return_value = now_utc
         mock_dt.timezone.utc = FIXED_UTC
         await b.check_birthdays.coro(b)
-    return mock_save
+    return mock_save, mock_save_sent, sent_log
 
 
 class TestCheckBirthdays:
@@ -72,10 +80,25 @@ class TestCheckBirthdays:
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        mock_save = await _run(b, data, now)
+        mock_save, mock_save_sent, sent_log = await _run(b, data, now)
 
         channel.send.assert_called_once()
-        mock_save.assert_called_once()
+        mock_save.assert_not_called()  # check_birthdays больше не трогает data.json
+        mock_save_sent.assert_called_once()
+        assert sent_log["111"]["42"] == 2026
+
+    async def test_pings_everyone_not_the_birthday_person(self):
+        now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
+        data = _guild_data(42, "05.06", "UTC")
+        channel = AsyncMock()
+        b = _make_bot(channel=channel, guild=MagicMock(
+            get_member=MagicMock(return_value=_make_member())))
+
+        await _run(b, data, now)
+
+        content = channel.send.call_args.kwargs["content"]
+        assert "@everyone" in content
+        assert "<@42>" not in content
 
     async def test_skips_before_hour_6(self):
         now = datetime.datetime(2026, 6, 5, 3, 0, 0, tzinfo=FIXED_UTC)
@@ -83,10 +106,10 @@ class TestCheckBirthdays:
         channel = AsyncMock()
         b = _make_bot(channel=channel)
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now)
 
         channel.send.assert_not_called()
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_congratulates_after_hour_6(self):
         """Bug fix: любой час >= 6 должен поздравлять, а не только ровно 6,
@@ -97,10 +120,11 @@ class TestCheckBirthdays:
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, sent_log = await _run(b, data, now)
 
         channel.send.assert_called_once()
-        mock_save.assert_called_once()
+        mock_save_sent.assert_called_once()
+        assert sent_log["111"]["42"] == 2026
 
     async def test_skips_wrong_date(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
@@ -108,49 +132,52 @@ class TestCheckBirthdays:
         channel = AsyncMock()
         b = _make_bot(channel=channel)
 
-        mock_save = await _run(b, data, now)
+        await _run(b, data, now)
 
         channel.send.assert_not_called()
 
     async def test_skips_already_sent_this_year(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
-        data = _guild_data(42, "05.06", "UTC", sent_year=2026)
+        data = _guild_data(42, "05.06", "UTC")
         channel = AsyncMock()
         b = _make_bot(channel=channel)
+        sent_log = {"111": {"42": 2026}}
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now, sent_log=sent_log)
 
         channel.send.assert_not_called()
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_resends_next_year(self):
         now = datetime.datetime(2027, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
-        data = _guild_data(42, "05.06", "UTC", sent_year=2026)  # sent in 2026, now 2027
+        data = _guild_data(42, "05.06", "UTC")
         channel = AsyncMock()
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
+        sent_log = {"111": {"42": 2026}}  # поздравляли в 2026, сейчас 2027
 
-        mock_save = await _run(b, data, now)
+        _, _, sent_log = await _run(b, data, now, sent_log=sent_log)
 
         channel.send.assert_called_once()
+        assert sent_log["111"]["42"] == 2027
 
     async def test_skips_no_channel_configured(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06", channel_id=None)
         b = _make_bot()
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now)
 
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_skips_channel_not_found(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06")
         b = _make_bot(channel=None)  # get_channel returns None
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now)
 
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_skips_guild_not_found(self):
         """Bug fix: guild=None не должен вызывать AttributeError."""
@@ -159,10 +186,10 @@ class TestCheckBirthdays:
         channel = AsyncMock()
         b = _make_bot(channel=channel, guild=None)
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now)
 
         channel.send.assert_not_called()
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_member_not_in_guild_skipped(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
@@ -172,22 +199,79 @@ class TestCheckBirthdays:
         guild.get_member.return_value = None  # пользователь вышел с сервера
         b = _make_bot(channel=channel, guild=guild)
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, _ = await _run(b, data, now)
 
         channel.send.assert_not_called()
-        mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
-    async def test_marks_sent_year_after_congratulation(self):
+    async def test_marks_sent_log_after_congratulation(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06")
         channel = AsyncMock()
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        mock_save = await _run(b, data, now)
+        _, mock_save_sent, sent_log = await _run(b, data, now)
 
-        saved = mock_save.call_args.args[0]
-        assert saved["111"]["sent_years"].get("42") == 2026
+        mock_save_sent.assert_called_once()
+        assert sent_log["111"]["42"] == 2026
+
+    async def test_send_failure_does_not_mark_as_sent(self):
+        """Bug fix: если отправка упала, поздравление не должно считаться
+        отправленным — иначе именинник был бы пропущен навсегда без единого
+        реального сообщения."""
+        now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
+        data = _guild_data(42, "05.06")
+        channel = AsyncMock()
+        channel.send.side_effect = RuntimeError("Discord API недоступен")
+        b = _make_bot(channel=channel, guild=MagicMock(
+            get_member=MagicMock(return_value=_make_member())))
+
+        _, mock_save_sent, sent_log = await _run(b, data, now)
+
+        mock_save_sent.assert_not_called()
+        assert "111" not in sent_log or "42" not in sent_log.get("111", {})
+
+    async def test_send_failure_in_one_guild_does_not_block_others(self):
+        now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
+        data = {
+            "111": {
+                "channel_id": 111, "timezone": "UTC",
+                "birthdays": {"1": "05.06"}, "user_timezones": {},
+                "image_url": "local", "title": "T", "message": "M",
+                "plural_title": "PT", "plural_message": "PM",
+                "color": "#FF5733", "color_title": "#00d4ff",
+                "color_msg": "#c3d2eb", "color_name": "#ffffff",
+                "font": "fonts/Jura-Bold.ttf",
+            },
+            "222": {
+                "channel_id": 222, "timezone": "UTC",
+                "birthdays": {"2": "05.06"}, "user_timezones": {},
+                "image_url": "local", "title": "T", "message": "M",
+                "plural_title": "PT", "plural_message": "PM",
+                "color": "#FF5733", "color_title": "#00d4ff",
+                "color_msg": "#c3d2eb", "color_name": "#ffffff",
+                "font": "fonts/Jura-Bold.ttf",
+            },
+        }
+        failing_channel = AsyncMock()
+        failing_channel.send.side_effect = RuntimeError("boom")
+        working_channel = AsyncMock()
+
+        def get_channel(cid):
+            return failing_channel if cid == 111 else working_channel
+
+        b = _make_bot()
+        b.get_channel = MagicMock(side_effect=get_channel)
+        guild = MagicMock()
+        guild.get_member.side_effect = lambda uid: _make_member(str(uid), f"User{uid}")
+        b.get_guild = MagicMock(return_value=guild)
+
+        _, mock_save_sent, sent_log = await _run(b, data, now)
+
+        working_channel.send.assert_called_once()
+        assert sent_log.get("222", {}).get("2") == 2026
+        assert "1" not in sent_log.get("111", {})
 
     async def test_timezone_utc_plus3_fires_at_utc3(self):
         """Europe/Moscow (UTC+3): поздравить при UTC 03:00 (= московские 06:00)."""
@@ -197,7 +281,7 @@ class TestCheckBirthdays:
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        mock_save = await _run(b, data, now)
+        await _run(b, data, now)
 
         channel.send.assert_called_once()
 
@@ -211,7 +295,7 @@ class TestCheckBirthdays:
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        mock_save = await _run(b, data, now)
+        await _run(b, data, now)
 
         channel.send.assert_called_once()
 
@@ -222,7 +306,7 @@ class TestCheckBirthdays:
         channel = AsyncMock()
         b = _make_bot(channel=channel)
 
-        mock_save = await _run(b, data, now)
+        await _run(b, data, now)
 
         channel.send.assert_not_called()
 
@@ -234,7 +318,6 @@ class TestCheckBirthdays:
                 "timezone": "UTC",
                 "birthdays": {"1": "05.06", "2": "05.06"},
                 "user_timezones": {},
-                "sent_years": {},
                 "image_url": "local",
                 "title": "T", "message": "M",
                 "plural_title": "PT", "plural_message": "PM",
@@ -248,15 +331,19 @@ class TestCheckBirthdays:
         guild.get_member.side_effect = lambda uid: _make_member(str(uid), f"User{uid}")
         b = _make_bot(channel=channel, guild=guild)
 
-        await _run(b, data, now)
+        _, mock_save_sent, sent_log = await _run(b, data, now)
 
         assert channel.send.call_count == 1  # одно сообщение на двоих
+        mock_save_sent.assert_called_once()
+        assert sent_log["111"]["1"] == 2026
+        assert sent_log["111"]["2"] == 2026
 
     async def test_empty_data_no_errors(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
         b = _make_bot()
-        mock_save = await _run(b, {}, now)
+        mock_save, mock_save_sent, _ = await _run(b, {}, now)
         mock_save.assert_not_called()
+        mock_save_sent.assert_not_called()
 
     async def test_gif_background_sends_two_embeds(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
@@ -266,16 +353,7 @@ class TestCheckBirthdays:
         b = _make_bot(channel=channel, guild=MagicMock(
             get_member=MagicMock(return_value=_make_member())))
 
-        fake_card = BytesIO(make_png_bytes((1100, 480)))
-        b.session = MagicMock()
-        with patch.object(bot, 'load_data', return_value=data), \
-             patch.object(bot, 'save_data'), \
-             patch('bot.create_birthday_card', return_value=fake_card), \
-             patch('bot._load_bg_bytes', new=AsyncMock(return_value=None)), \
-             patch('bot.datetime') as mock_dt:
-            mock_dt.datetime.now.return_value = now
-            mock_dt.timezone.utc = FIXED_UTC
-            await b.check_birthdays.coro(b)
+        await _run(b, data, now)
 
         kwargs = channel.send.call_args.kwargs
         assert "embeds" in kwargs

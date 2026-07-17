@@ -36,12 +36,41 @@ class TestSaveData:
         assert bot.load_data()["1"]["msg"] == "Привет"
 
 
+class TestLoadSentLog:
+    def test_returns_empty_dict_if_no_file(self, tmp_sent_log):
+        assert bot.load_sent_log() == {}
+
+    def test_loads_existing_json(self, tmp_sent_log):
+        payload = {"123": {"42": 2026}}
+        with open(tmp_sent_log, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+        assert bot.load_sent_log() == payload
+
+
+class TestSaveSentLog:
+    def test_saves_and_reloads(self, tmp_sent_log):
+        data = {"456": {"1": 2026}}
+        bot.save_sent_log(data)
+        assert bot.load_sent_log() == data
+
+    def test_overwrites_previous(self, tmp_sent_log):
+        bot.save_sent_log({"a": {"1": 2025}})
+        bot.save_sent_log({"b": {"2": 2026}})
+        assert bot.load_sent_log() == {"b": {"2": 2026}}
+
+    def test_independent_from_main_data_file(self, tmp_data, tmp_sent_log):
+        """Журнал отправок и основные данные (data.json) — разные файлы."""
+        bot.save_data({"111": {"channel_id": 1}})
+        bot.save_sent_log({"111": {"42": 2026}})
+        assert bot.load_data() == {"111": {"channel_id": 1}}
+        assert bot.load_sent_log() == {"111": {"42": 2026}}
+
+
 class TestGetGuildData:
     def test_new_guild_gets_default_structure(self, tmp_data):
         d, all_d = bot.get_guild_data(999)
         assert "channel_id" in d
         assert "birthdays" in d
-        assert "sent_years" in d
         assert "user_timezones" in d
         assert d["birthdays"] == {}
 
@@ -54,7 +83,6 @@ class TestGetGuildData:
             "999": {
                 "channel_id": 42,
                 "birthdays": {"1": "01.01"},
-                "sent_years": {},
                 "user_timezones": {},
             }
         }
