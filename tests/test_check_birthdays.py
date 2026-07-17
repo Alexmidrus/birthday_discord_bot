@@ -77,8 +77,8 @@ class TestCheckBirthdays:
         channel.send.assert_called_once()
         mock_save.assert_called_once()
 
-    async def test_skips_wrong_hour(self):
-        now = datetime.datetime(2026, 6, 5, 10, 0, 0, tzinfo=FIXED_UTC)
+    async def test_skips_before_hour_6(self):
+        now = datetime.datetime(2026, 6, 5, 3, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06", "UTC")
         channel = AsyncMock()
         b = _make_bot(channel=channel)
@@ -87,6 +87,20 @@ class TestCheckBirthdays:
 
         channel.send.assert_not_called()
         mock_save.assert_not_called()
+
+    async def test_congratulates_after_hour_6(self):
+        """Bug fix: любой час >= 6 должен поздравлять, а не только ровно 6,
+        чтобы даунтайм бота в 6-й час не пропускал поздравление на весь год."""
+        now = datetime.datetime(2026, 6, 5, 10, 0, 0, tzinfo=FIXED_UTC)
+        data = _guild_data(42, "05.06", "UTC")
+        channel = AsyncMock()
+        b = _make_bot(channel=channel, guild=MagicMock(
+            get_member=MagicMock(return_value=_make_member())))
+
+        mock_save = await _run(b, data, now)
+
+        channel.send.assert_called_once()
+        mock_save.assert_called_once()
 
     async def test_skips_wrong_date(self):
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
@@ -187,9 +201,23 @@ class TestCheckBirthdays:
 
         channel.send.assert_called_once()
 
-    async def test_timezone_aware_no_fire_at_utc6_for_moscow_user(self):
-        """Московский пользователь: UTC 06:00 = Moscow 09:00, не должно поздравлять."""
+    async def test_timezone_aware_still_fires_late_for_moscow_user(self):
+        """Московский пользователь: UTC 06:00 = Moscow 09:00. Это позже 06:00
+        по его поясу, так что поздравление всё равно должно уйти (догоняющая
+        проверка на случай, если бот был недоступен ровно в 03:00 UTC)."""
         now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
+        data = _guild_data(42, "05.06", tz="Europe/Moscow")
+        channel = AsyncMock()
+        b = _make_bot(channel=channel, guild=MagicMock(
+            get_member=MagicMock(return_value=_make_member())))
+
+        mock_save = await _run(b, data, now)
+
+        channel.send.assert_called_once()
+
+    async def test_timezone_aware_no_fire_before_6am_for_moscow_user(self):
+        """Московский пользователь: UTC 02:00 = Moscow 05:00, ещё рано."""
+        now = datetime.datetime(2026, 6, 5, 2, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06", tz="Europe/Moscow")
         channel = AsyncMock()
         b = _make_bot(channel=channel)
