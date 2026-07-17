@@ -607,6 +607,20 @@ class BirthdayBot(commands.Bot):
             user_timezones = guild_data.get("user_timezones", {})
             guild_sent = sent_log.setdefault(guild_id_str, {})
 
+            # Разовая миграция устаревшего guild_data["sent_years"] (до перехода
+            # на sent_log.json) в новый журнал. Без этого пользователи, уже
+            # отмеченные отправленными в старом формате, получили бы повторное
+            # поздравление, если их день рождения ещё не наступил на момент
+            # обновления бота.
+            legacy_sent = guild_data.get("sent_years") or {}
+            migrated = {uid: year for uid, year in legacy_sent.items() if uid not in guild_sent}
+            if migrated:
+                guild_sent.update(migrated)
+                save_sent_log(sent_log)
+                logger.info(
+                    "Сервер %s: перенёс устаревшие отметки sent_years в sent_log.json: %s.",
+                    guild_id_str, migrated)
+
             to_congratulate = []
 
             for user_id_str, date_str in guild_data.get("birthdays", {}).items():

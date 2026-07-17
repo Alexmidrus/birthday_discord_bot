@@ -148,6 +148,24 @@ class TestCheckBirthdays:
         channel.send.assert_not_called()
         mock_save_sent.assert_not_called()
 
+    async def test_legacy_sent_years_prevents_duplicate_after_migration(self):
+        """Bug fix: до перехода на sent_log.json отметка "уже поздравлен"
+        хранилась в guild_data["sent_years"] (data.json). При первом же
+        запуске с новым кодом это должно быть перенесено в sent_log.json,
+        иначе человек, уже поздравленный в этом году по старой схеме,
+        получил бы поздравление повторно."""
+        now = datetime.datetime(2026, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
+        data = _guild_data(42, "05.06", "UTC")
+        data["111"]["sent_years"] = {"42": 2026}
+        channel = AsyncMock()
+        b = _make_bot(channel=channel)
+
+        _, mock_save_sent, sent_log = await _run(b, data, now)
+
+        channel.send.assert_not_called()
+        mock_save_sent.assert_called_once()
+        assert sent_log["111"]["42"] == 2026
+
     async def test_resends_next_year(self):
         now = datetime.datetime(2027, 6, 5, 6, 0, 0, tzinfo=FIXED_UTC)
         data = _guild_data(42, "05.06", "UTC")
